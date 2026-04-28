@@ -12,6 +12,7 @@ sandix intercepts this at two points:
 
 1. **`sandix env`** — a stdin filter that rewrites `/nix/store/<hash>/bin` entries in PATH to point through a FUSE mount instead.
 2. **`sandix fuse`** — a FUSE daemon that serves the rewritten paths. When a binary is executed through the mount, it transparently serves a landrun wrapper script that runs the real binary in a sandbox (read-only-executable `/nix/store`, read-write-executable `$PWD`, read-write `/tmp` and `/dev`).
+3. **`direnv-sandbox`** — a small standalone `DIRENV_BASH` wrapper that runs direnv's `.envrc` evaluation bash process through landrun.
 
 ## Trust boundary
 
@@ -20,6 +21,7 @@ trusted                               untrusted
 ──────────────────────────────────────────────────────
 ~/.zshrc                              .envrc
 sandix binary                         flake.nix
+direnv-sandbox                        shellHook
 landrun (runtime dep, from Nix)
 ```
 
@@ -41,7 +43,11 @@ Mounts at `$XDG_RUNTIME_DIR/sandix-store` by default. No root required.
 # with nix develop
 nix print-dev-env | sandix env | source /dev/stdin
 
-# with direnv — add to ~/.zshrc:
+# sandbox direnv's bash subprocess
+export DIRENV_BASH="$(command -v direnv-sandbox)"
+eval "$(direnv hook zsh)"
+
+# optional: also rewrite PATH entries from direnv through sandix
 _direnv_hook_sandboxed() {
     local output
     output=$(direnv export zsh 2>/dev/null)
@@ -76,15 +82,37 @@ Each devshell binary runs with:
 # flake.nix
 inputs.sandix.url = "github:lorenzbischof/sandix";
 
-# in your packages:
 sandix.packages.${system}.default
+sandix.packages.${system}.direnv-sandbox
+sandix.nixosModules.direnv-sandbox
+sandix.homeManagerModules.direnv-sandbox
+```
+
+```nix
+# configuration.nix
+{
+  imports = [ inputs.sandix.nixosModules.direnv-sandbox ];
+
+  programs.direnv = {
+    enable = true;
+    sandbox.enable = true;
+  };
+}
+```
+
+```nix
+# home.nix
+{
+  imports = [ inputs.sandix.homeManagerModules.direnv-sandbox ];
+
+  programs.direnv = {
+    enable = true;
+    sandbox.enable = true;
+  };
+}
 ```
 
 ## Limitations
-
-**`shellHook` is not sandboxed.** The `shellHook` is inline shell code that gets `eval`'d alongside the environment. Sandboxing it is not yet implemented.
-
-**Direnv is not sandboxed.** sandix wraps binaries reachable via PATH. It does not sandbox the `.envrc` evaluation itself or anything that happens before the environment is applied to the shell. See [direnv-sandbox](https://github.com/DavHau/sbox/blob/main/direnv-sandbox/README.md) for a possible implementation.
 
 **Scripts are not sandboxed.** Scripts that are directly executed from the shell are not sandboxed. See [peninsula](https://github.com/LorenzBischof/peninsula) for a possible workaround.
 
@@ -95,3 +123,4 @@ sandix.packages.${system}.default
 | `sandix fuse` | FUSE daemon serving wrapper scripts at the sandboxed store mount |
 | `sandix env` | stdin filter rewriting PATH entries to route through the FUSE mount |
 | `sandix develop` | drop-in for `nix develop` that applies sandboxing automatically |
+| `direnv-sandbox` | standalone `DIRENV_BASH` wrapper that evaluates `.envrc` through landrun |
