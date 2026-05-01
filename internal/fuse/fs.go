@@ -38,8 +38,7 @@ func (r *RootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 	return child, 0
 }
 
-// StoreEntryNode represents a store path directory. Any child lookup
-// returns a BinDirNode — only bin/ will ever be accessed in practice.
+// StoreEntryNode represents a store path directory. Only bin/ is exposed.
 type StoreEntryNode struct {
 	gofuse.Inode
 	storeName   string
@@ -49,6 +48,10 @@ type StoreEntryNode struct {
 var _ gofuse.NodeLookuper = (*StoreEntryNode)(nil)
 
 func (n *StoreEntryNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*gofuse.Inode, syscall.Errno) {
+	if name != "bin" {
+		return nil, syscall.ENOENT
+	}
+
 	child := n.NewPersistentInode(ctx, &BinDirNode{
 		storeName:   n.storeName,
 		landrunPath: n.landrunPath,

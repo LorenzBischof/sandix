@@ -26,15 +26,17 @@ func defaultMountPoint() string {
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, "Usage: sandix <command> [args]\n")
-		fmt.Fprintf(os.Stderr, "Commands: fuse, env, develop\n")
+		fmt.Fprintf(os.Stderr, "Commands: fuse, wrap, rewrite, develop\n")
 		os.Exit(1)
 	}
 
 	switch os.Args[1] {
 	case "fuse":
 		cmdFuse(os.Args[2:])
-	case "env":
-		cmdEnv(os.Args[2:])
+	case "wrap":
+		cmdWrap(os.Args[2:])
+	case "rewrite":
+		cmdRewrite(os.Args[2:])
 	case "develop":
 		cmdDevelop(os.Args[2:])
 	default:
@@ -82,9 +84,10 @@ func cmdFuse(args []string) {
 	server.Wait()
 }
 
-func cmdEnv(args []string) {
-	fs := flag.NewFlagSet("env", flag.ExitOnError)
+func cmdWrap(args []string) {
+	fs := flag.NewFlagSet("wrap", flag.ExitOnError)
 	mountPoint := fs.String("mount-point", defaultMountPoint(), "sandboxed store mount point")
+	baseline := fs.String("baseline", os.Getenv("PATH"), "trusted baseline PATH")
 	fs.Parse(args)
 
 	input, err := io.ReadAll(os.Stdin)
@@ -92,8 +95,31 @@ func cmdEnv(args []string) {
 		log.Fatalf("Failed to read stdin: %v", err)
 	}
 
-	output := rewriter.Rewrite(input, *mountPoint)
+	sandixPath, err := os.Executable()
+	if err != nil {
+		log.Fatalf("Failed to resolve sandix executable: %v", err)
+	}
+
+	output := rewriter.AppendPathRewrite(input, *baseline, *mountPoint, sandixPath)
 	os.Stdout.Write(output)
+}
+
+func cmdRewrite(args []string) {
+	fs := flag.NewFlagSet("rewrite", flag.ExitOnError)
+	mountPoint := fs.String("mount-point", defaultMountPoint(), "sandboxed store mount point")
+	baseline := fs.String("baseline", os.Getenv("PATH"), "trusted baseline PATH")
+	fs.Parse(args)
+
+	pathValue := os.Getenv("PATH")
+	switch fs.NArg() {
+	case 0:
+	case 1:
+		pathValue = fs.Arg(0)
+	default:
+		log.Fatalf("Usage: sandix rewrite [--mount-point PATH] [--baseline PATH] [PATH]")
+	}
+
+	fmt.Print(rewriter.RewritePath(pathValue, *baseline, *mountPoint))
 }
 
 func cmdDevelop(args []string) {
@@ -110,7 +136,11 @@ func cmdDevelop(args []string) {
 		log.Fatalf("nix print-dev-env failed: %v", err)
 	}
 
-	rewritten := rewriter.Rewrite(output, *mountPoint)
+	sandixPath, err := os.Executable()
+	if err != nil {
+		log.Fatalf("Failed to resolve sandix executable: %v", err)
+	}
+	rewritten := rewriter.AppendPathRewrite(output, os.Getenv("PATH"), *mountPoint, sandixPath)
 
 	// Eval the rewritten environment and exec into a new shell.
 	shell := os.Getenv("SHELL")

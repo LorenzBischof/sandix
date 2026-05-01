@@ -10,7 +10,7 @@ When you enter a Nix devshell, tools like `nix develop` or `direnv` add `/nix/st
 
 sandix intercepts this at two points:
 
-1. **`sandix env`** — a stdin filter that rewrites `/nix/store/<hash>/bin` entries in PATH to point through a FUSE mount instead.
+1. **`sandix wrap`** — a stdin filter that preserves the incoming shell script and appends a post-eval PATH rewrite step. The rewrite step only changes `/nix/store/<hash>/...` PATH entries that were added by the script, leaving pre-existing system PATH entries untouched.
 2. **`sandix fuse`** — a FUSE daemon that serves the rewritten paths. When a binary is executed through the mount, it transparently serves a landrun wrapper script that runs the real binary in a sandbox (read-only-executable `/nix/store`, read-write-executable `$PWD`, read-write `/tmp` and `/dev`).
 3. **`direnv-sandbox`** — a small standalone `DIRENV_BASH` wrapper that runs direnv's `.envrc` evaluation bash process through landrun.
 
@@ -25,7 +25,7 @@ direnv-sandbox                        shellHook
 landrun (runtime dep, from Nix)
 ```
 
-Flake code and `.envrc` are hostile data sources. Their output is intercepted and processed by sandix before touching the shell.
+Flake code and `.envrc` are hostile data sources. sandix leaves their shell output intact, then rewrites the resulting PATH before the hook returns control to the interactive shell.
 
 ## Usage
 
@@ -41,14 +41,14 @@ Mounts at `$XDG_RUNTIME_DIR/sandix-store` by default. No root required.
 
 ```bash
 # with nix develop
-nix print-dev-env | sandix env | source /dev/stdin
+nix print-dev-env | sandix wrap | source /dev/stdin
 
 # optional: also rewrite PATH entries from direnv through sandix
 _direnv_hook_sandboxed() {
     local output
     output=$(direnv export zsh 2>/dev/null)
     if [[ -n "$output" ]]; then
-        output=$(echo "$output" | sandix env)
+        output=$(echo "$output" | sandix wrap)
     fi
     eval "$output"
 }
@@ -110,11 +110,16 @@ sandix.homeManagerModules.direnv-sandbox
 
 **Scripts are not sandboxed.** Scripts that are directly executed from the shell are not sandboxed. See [peninsula](https://github.com/LorenzBischof/peninsula) for a possible workaround.
 
+**Only PATH command lookup is rewritten.** Direct execution of `/nix/store/...` paths, aliases, shell functions, and non-PATH variables are not rewritten by `sandix wrap`.
+
+**Only derivation `/bin` directories are served.** If a derivation exposes commands from another store subdirectory, `sandix wrap` still rewrites that PATH entry through the FUSE mount, but the mount does not serve it. Nonstandard command locations may not work, but they do not bypass the sandbox.
+
 ## Components
 
 | Binary | Description |
 |---|---|
 | `sandix fuse` | FUSE daemon serving wrapper scripts at the sandboxed store mount |
-| `sandix env` | stdin filter rewriting PATH entries to route through the FUSE mount |
+| `sandix wrap` | stdin filter appending a post-eval PATH rewrite step |
+| `sandix rewrite` | rewrites one PATH value relative to a trusted baseline PATH |
 | `sandix develop` | drop-in for `nix develop` that applies sandboxing automatically |
 | `direnv-sandbox` | standalone `DIRENV_BASH` wrapper that evaluates `.envrc` through landrun |
