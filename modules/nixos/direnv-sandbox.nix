@@ -25,6 +25,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    environment.variables.DIRENV_BASH = lib.getExe cfg.package;
+    environment.etc."direnv-sandbox".source = lib.getExe cfg.package;
+    environment.variables.DIRENV_BASH = "/etc/direnv-sandbox";
   };
 }

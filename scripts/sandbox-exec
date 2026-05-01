@@ -1,0 +1,49 @@
+
+args=()
+
+if [[ -n "${HOME:-}" ]]; then
+  xdg_config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+  sandbox_cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/sandix"
+  sandbox_data_root="${XDG_DATA_HOME:-$HOME/.local/share}/sandix"
+  sandbox_state_root="${XDG_STATE_HOME:-$HOME/.local/state}/sandix"
+
+  mkdir -p "$sandbox_cache_root" "$sandbox_data_root" "$sandbox_state_root"
+
+  args+=(--env "XDG_CACHE_HOME=$sandbox_cache_root")
+  args+=(--env "XDG_DATA_HOME=$sandbox_data_root")
+  args+=(--env "XDG_STATE_HOME=$sandbox_state_root")
+  [[ -d "$xdg_config_home/direnv" ]] && args+=(--ro "$xdg_config_home/direnv")
+  [[ -d "$xdg_config_home/nix" ]] && args+=(--ro "$xdg_config_home/nix")
+  args+=(--rw "$sandbox_cache_root")
+  args+=(--rw "$sandbox_data_root")
+  args+=(--rw "$sandbox_state_root")
+
+fi
+
+[[ -e /etc/nix ]] && args+=(--ro /etc/nix)
+[[ -e /etc/resolv.conf ]] && args+=(--ro /etc/resolv.conf)
+[[ -e /etc/hosts ]] && args+=(--ro /etc/hosts)
+[[ -e /etc/nsswitch.conf ]] && args+=(--ro /etc/nsswitch.conf)
+[[ -e /nix/var/nix/daemon-socket/socket ]] && args+=(--rw /nix/var/nix/daemon-socket/socket)
+
+exec landrun \
+  "${args[@]}" \
+  --unrestricted-network \
+  --rox /nix/store \
+  --rwx "${PWD:-$(pwd)}" \
+  --rw /tmp \
+  --rw /proc,/dev,/sys \
+  --env HOME \
+  --env USER \
+  --env PATH \
+  --env TERM \
+  --env TERMINFO \
+  --env TERMINFO_DIRS \
+  --env COLORTERM \
+  --env LANG \
+  --env LC_ALL \
+  --env LC_CTYPE \
+  --env NIX_REMOTE \
+  --env SSL_CERT_FILE \
+  --env NIX_SSL_CERT_FILE \
+  -- "$@"

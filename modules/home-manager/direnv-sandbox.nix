@@ -8,6 +8,9 @@
 let
   cfg = config.programs.direnv.sandbox;
 in
+let
+  stablePath = "${config.home.homeDirectory}/.local/share/direnv-sandbox/bash";
+in
 {
   options.programs.direnv.sandbox = {
     enable = lib.mkEnableOption ''
@@ -25,6 +28,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    home.sessionVariables.DIRENV_BASH = lib.getExe cfg.package;
+    home.file.".local/share/direnv-sandbox/bash".source = lib.getExe cfg.package;
+    home.sessionVariables.DIRENV_BASH = stablePath;
   };
 }

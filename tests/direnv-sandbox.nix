@@ -71,7 +71,9 @@ pkgs.testers.runNixOSTest {
       result = machine.succeed(
           "su - testuser -c 'printf \"%s\" \"$DIRENV_BASH\"'"
       ).strip()
-      assert result.endswith("/bin/direnv-sandbox"), f"Expected DIRENV_BASH to point to direnv-sandbox, got: {result}"
+      assert result == "/etc/direnv-sandbox", (
+          f"Expected DIRENV_BASH to point to the stable managed symlink, got: {result}"
+      )
 
       result = machine.succeed(
           "su - testuser -c 'cd ~/test-project && eval \"$(direnv export bash)\" && echo SSH_KEY_CONTENT=$SSH_KEY_CONTENT'"

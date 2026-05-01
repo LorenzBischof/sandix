@@ -28,7 +28,7 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
         in
-        {
+        rec {
           default = pkgs.buildGoModule {
             pname = "sandix";
             version = "0.1.0";
@@ -42,11 +42,20 @@
             '';
           };
 
+          sandbox-exec = pkgs.writeShellApplication {
+            name = "sandbox-exec";
+            runtimeInputs = [
+              pkgs.bash
+              pkgs.landrun
+            ];
+            text = builtins.readFile ./scripts/sandbox-exec;
+          };
+
           direnv-sandbox = pkgs.writeShellApplication {
             name = "direnv-sandbox";
             runtimeInputs = [
               pkgs.bash
-              pkgs.landrun
+              sandbox-exec
             ];
             text = builtins.readFile ./scripts/direnv-sandbox;
           };

@@ -43,10 +43,6 @@ Mounts at `$XDG_RUNTIME_DIR/sandix-store` by default. No root required.
 # with nix develop
 nix print-dev-env | sandix env | source /dev/stdin
 
-# sandbox direnv's bash subprocess
-export DIRENV_BASH="$(command -v direnv-sandbox)"
-eval "$(direnv hook zsh)"
-
 # optional: also rewrite PATH entries from direnv through sandix
 _direnv_hook_sandboxed() {
     local output
@@ -82,8 +78,6 @@ Each devshell binary runs with:
 # flake.nix
 inputs.sandix.url = "github:lorenzbischof/sandix";
 
-sandix.packages.${system}.default
-sandix.packages.${system}.direnv-sandbox
 sandix.nixosModules.direnv-sandbox
 sandix.homeManagerModules.direnv-sandbox
 ```
