@@ -2,7 +2,16 @@
 
 > **EXPERIMENTAL: This project is an unfinished experiment. It was designed and implemented through an AI-assisted conversation with minimal manual review. It has not been audited, thoroughly tested, or validated for correctness or security. Do not use it in production. Do not rely on this for actual security guarantees.**
 
-Sandbox Nix devshell binaries using [landrun](https://github.com/Zouuup/landrun).
+sandix sandboxes the binaries that Nix development shells add to your `PATH`.
+When you enter a project with `nix develop` or `direnv`, the project's flake,
+`.envrc`, and shell hooks can place arbitrary tools in your shell. Running one
+of those tools normally gives it the same filesystem access as you, including
+your home directory, local keys, API tokens, and private Git repositories.
+
+Unlike full-shell sandboxes such as [sbox](https://github.com/DavHau/sbox), sandix does not put your whole
+interactive shell in a box. Your prompt, aliases, shell functions, editor
+integration and host commands keep working outside the sandbox; only
+binaries introduced by the devshell are routed through sandbox wrappers.
 
 ## How it works
 
@@ -11,8 +20,8 @@ When you enter a Nix devshell, tools like `nix develop` or `direnv` add `/nix/st
 sandix intercepts this at two points:
 
 1. **`sandix wrap`** — a stdin filter that preserves the incoming shell script and appends a post-eval PATH rewrite step. The rewrite step only changes `/nix/store/<hash>/...` PATH entries that were added by the script, leaving pre-existing system PATH entries untouched.
-2. **`sandix fuse`** — a FUSE daemon that serves the rewritten paths. When a binary is executed through the mount, it transparently serves a landrun wrapper script that runs the real binary in a sandbox (read-only-executable `/nix/store`, read-write-executable `$PWD`, read-write `/tmp` and `/dev`).
-3. **`direnv-sandbox`** — a small standalone `DIRENV_BASH` wrapper that runs direnv's `.envrc` evaluation bash process through landrun.
+2. **`sandix fuse`** — a FUSE daemon that serves the rewritten paths. When a binary is executed through the mount, it transparently serves a wrapper script that runs the real binary through `sandbox-exec`.
+3. **`direnv-sandbox`** — a small standalone `DIRENV_BASH` wrapper that runs direnv's `.envrc` evaluation bash process through `sandbox-exec`.
 
 ## Trust boundary
 
@@ -20,9 +29,9 @@ sandix intercepts this at two points:
 trusted                               untrusted
 ──────────────────────────────────────────────────────
 ~/.zshrc                              .envrc
-sandix binary                         flake.nix
-direnv-sandbox                        shellHook
-landrun (runtime dep, from Nix)
+sandix                                flake.nix
+direnv
+landrun
 ```
 
 Flake code and `.envrc` are hostile data sources. sandix leaves their shell output intact, then rewrites the resulting PATH before the hook returns control to the interactive shell.
@@ -43,18 +52,11 @@ falls back to `/run/user/<uid>/sandix`. No root required.
 ```bash
 # with nix develop
 nix print-dev-env | sandix wrap | source /dev/stdin
-
-# optional: also rewrite PATH entries from direnv through sandix
-_direnv_hook_sandboxed() {
-    local output
-    output=$(direnv export zsh 2>/dev/null)
-    if [[ -n "$output" ]]; then
-        output=$(echo "$output" | sandix wrap)
-    fi
-    eval "$output"
-}
-precmd_functions+=(_direnv_hook_sandboxed)
 ```
+
+For direnv, use one of the modules below. They wrap `programs.direnv.package`
+so `direnv export` is piped through `sandix wrap`, and they install a user
+`sandix-fuse` systemd service.
 
 ### Enter a sandboxed devshell directly
 
@@ -66,12 +68,15 @@ sandix develop /path/to/project
 
 ## Landrun sandbox profile
 
-Each devshell binary runs with:
+Each devshell binary runs through `sandbox-exec`, which currently allows:
 
 - `--rox /nix/store` — read-only-executable store access
 - `--rwx $PWD` — read-write-executable access to current directory
-- `--rw /tmp --rw /dev` — read-write access to temporary files and device nodes
-- `--env <name>` for each inherited environment variable
+- `--rw /tmp --rw /proc,/dev,/sys` — read-write access to temporary files and common runtime filesystems
+- read-only access to common Nix and network configuration files
+- isolated XDG cache, data, and state directories under sandix-specific paths
+- unrestricted network access
+- a small allowlist of environment variables
 
 ## Installation
 
@@ -121,4 +126,5 @@ sandix.homeManagerModules.direnv-sandbox
 | `sandix wrap` | stdin filter appending a post-eval PATH rewrite step |
 | `sandix rewrite` | rewrites one PATH value relative to a trusted baseline PATH |
 | `sandix develop` | drop-in for `nix develop` that applies sandboxing automatically |
-| `direnv-sandbox` | standalone `DIRENV_BASH` wrapper that evaluates `.envrc` through landrun |
+| `direnv-sandbox` | standalone `DIRENV_BASH` wrapper that evaluates `.envrc` through `sandbox-exec` |
+| `sandbox-exec` | wrapper around `landrun` used by generated command wrappers |
