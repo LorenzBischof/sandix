@@ -6,25 +6,22 @@ import (
 )
 
 func TestGenerate(t *testing.T) {
-	result := string(Generate("abc123-gcc-12.3", "gcc", "/usr/bin/landrun"))
+	result := string(Generate("abc123-gcc-12.3", "gcc", "/usr/bin/sandbox-exec"))
 
 	if !strings.HasPrefix(result, "#!/bin/sh\n") {
 		t.Error("wrapper should start with shebang")
 	}
-	if !strings.Contains(result, "/usr/bin/landrun") {
-		t.Error("wrapper should contain landrun path")
+	if !strings.Contains(result, "/usr/bin/sandbox-exec") {
+		t.Error("wrapper should contain sandbox-exec path")
 	}
 	if !strings.Contains(result, "/nix/store/abc123-gcc-12.3/bin/gcc") {
 		t.Error("wrapper should contain full binary path")
 	}
-	if !strings.Contains(result, "--env") {
-		t.Error("wrapper should pass through environment variables")
+	if strings.Contains(result, "landrun") {
+		t.Error("wrapper should delegate sandbox policy to sandbox-exec")
 	}
-	if !strings.Contains(result, "--rox /nix/store") {
-		t.Error("wrapper should allow read-only execution from /nix/store")
-	}
-	if strings.Contains(result, "--ro /etc") {
-		t.Error("wrapper should not allow /etc passthrough")
+	if !strings.Contains(result, "SANDIX_PATH") {
+		t.Error("wrapper should use the devshell PATH before entering sandbox-exec")
 	}
 	if !strings.Contains(result, `"$@"`) {
 		t.Error("wrapper should pass through arguments")
@@ -32,8 +29,8 @@ func TestGenerate(t *testing.T) {
 }
 
 func TestGenerateDeterministic(t *testing.T) {
-	a := Generate("abc-foo-1.0", "foo", "/bin/landrun")
-	b := Generate("abc-foo-1.0", "foo", "/bin/landrun")
+	a := Generate("abc-foo-1.0", "foo", "/bin/sandbox-exec")
+	b := Generate("abc-foo-1.0", "foo", "/bin/sandbox-exec")
 	if string(a) != string(b) {
 		t.Error("Generate should be deterministic")
 	}

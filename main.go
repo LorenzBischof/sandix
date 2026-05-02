@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strconv"
 	"syscall"
 
 	gofuse "github.com/hanwen/go-fuse/v2/fs"
@@ -18,9 +20,9 @@ import (
 
 func defaultMountPoint() string {
 	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
-		return dir + "/sandix-store"
+		return filepath.Join(dir, "sandix")
 	}
-	return os.Getenv("HOME") + "/.local/share/sandix/store"
+	return filepath.Join("/run/user", strconv.Itoa(os.Getuid()), "sandix")
 }
 
 func main() {
@@ -55,12 +57,12 @@ func cmdFuse(args []string) {
 		log.Fatalf("Failed to create mount point %s: %v", *mountPoint, err)
 	}
 
-	landrunPath, err := exec.LookPath("landrun")
+	sandboxExecPath, err := exec.LookPath("sandbox-exec")
 	if err != nil {
-		log.Fatalf("landrun not found in PATH: %v", err)
+		log.Fatalf("sandbox-exec not found in PATH: %v", err)
 	}
 
-	root := &sandixfuse.RootNode{LandrunPath: landrunPath}
+	root := &sandixfuse.RootNode{SandboxExecPath: sandboxExecPath}
 	server, err := gofuse.Mount(*mountPoint, root, &gofuse.Options{
 		MountOptions: fuse.MountOptions{
 			Debug:      *debug,
@@ -80,7 +82,7 @@ func cmdFuse(args []string) {
 		server.Unmount()
 	}()
 
-	log.Printf("Serving sandboxed store at %s (landrun: %s)", *mountPoint, landrunPath)
+	log.Printf("Serving sandboxed store at %s (sandbox-exec: %s)", *mountPoint, sandboxExecPath)
 	server.Wait()
 }
 
@@ -88,6 +90,7 @@ func cmdWrap(args []string) {
 	fs := flag.NewFlagSet("wrap", flag.ExitOnError)
 	mountPoint := fs.String("mount-point", defaultMountPoint(), "sandboxed store mount point")
 	baseline := fs.String("baseline", os.Getenv("PATH"), "trusted baseline PATH")
+	trustedPath := fs.String("trusted-path", "", "trusted host PATH entries to prepend outside the sandbox")
 	fs.Parse(args)
 
 	input, err := io.ReadAll(os.Stdin)
@@ -100,7 +103,7 @@ func cmdWrap(args []string) {
 		log.Fatalf("Failed to resolve sandix executable: %v", err)
 	}
 
-	output := rewriter.AppendPathRewrite(input, *baseline, *mountPoint, sandixPath)
+	output := rewriter.AppendPathRewrite(input, *baseline, *mountPoint, sandixPath, *trustedPath)
 	os.Stdout.Write(output)
 }
 
@@ -140,7 +143,7 @@ func cmdDevelop(args []string) {
 	if err != nil {
 		log.Fatalf("Failed to resolve sandix executable: %v", err)
 	}
-	rewritten := rewriter.AppendPathRewrite(output, os.Getenv("PATH"), *mountPoint, sandixPath)
+	rewritten := rewriter.AppendPathRewrite(output, os.Getenv("PATH"), *mountPoint, sandixPath, "")
 
 	// Eval the rewritten environment and exec into a new shell.
 	shell := os.Getenv("SHELL")

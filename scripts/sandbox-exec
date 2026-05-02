@@ -1,4 +1,6 @@
 
+command_path="${SANDIX_PATH:-${PATH:-}}"
+
 args=()
 
 if [[ -n "${HOME:-}" ]]; then
@@ -35,7 +37,7 @@ exec landrun \
   --rw /proc,/dev,/sys \
   --env HOME \
   --env USER \
-  --env PATH \
+  --env "PATH=$command_path" \
   --env TERM \
   --env TERMINFO \
   --env TERMINFO_DIRS \

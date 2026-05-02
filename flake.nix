@@ -38,8 +38,9 @@
             nativeBuildInputs = [ pkgs.makeWrapper ];
             postInstall = ''
               wrapProgram $out/bin/sandix \
-                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.landrun ]}
+                --prefix PATH : ${pkgs.lib.makeBinPath [ sandbox-exec ]}
             '';
+            meta.mainProgram = "sandix";
           };
 
           sandbox-exec = pkgs.writeShellApplication {

@@ -1,6 +1,6 @@
 # sandix
 
-> **⚠️ DISCLAIMER: This project was vibe coded. It was designed and implemented through an AI-assisted conversation with minimal manual review. It has not been audited, thoroughly tested, or validated for correctness or security. Use at your own risk. Do not rely on this for actual security guarantees.**
+> **EXPERIMENTAL: This project is an unfinished experiment. It was designed and implemented through an AI-assisted conversation with minimal manual review. It has not been audited, thoroughly tested, or validated for correctness or security. Do not use it in production. Do not rely on this for actual security guarantees.**
 
 Sandbox Nix devshell binaries using [landrun](https://github.com/Zouuup/landrun).
 
@@ -35,7 +35,8 @@ Flake code and `.envrc` are hostile data sources. sandix leaves their shell outp
 sandix fuse
 ```
 
-Mounts at `$XDG_RUNTIME_DIR/sandix-store` by default. No root required.
+Mounts at `$XDG_RUNTIME_DIR/sandix` by default. If `XDG_RUNTIME_DIR` is unset,
+falls back to `/run/user/<uid>/sandix`. No root required.
 
 ### Rewrite a devshell environment
 
@@ -111,8 +112,6 @@ sandix.homeManagerModules.direnv-sandbox
 **Scripts are not sandboxed.** Scripts that are directly executed from the shell are not sandboxed. See [peninsula](https://github.com/LorenzBischof/peninsula) for a possible workaround.
 
 **Only PATH command lookup is rewritten.** Direct execution of `/nix/store/...` paths, aliases, shell functions, and non-PATH variables are not rewritten by `sandix wrap`.
-
-**Only derivation `/bin` directories are served.** If a derivation exposes commands from another store subdirectory, `sandix wrap` still rewrites that PATH entry through the FUSE mount, but the mount does not serve it. Nonstandard command locations may not work, but they do not bypass the sandbox.
 
 ## Components
 

@@ -7,6 +7,19 @@
 }:
 let
   cfg = config.programs.direnv.sandbox;
+  direnvCfg = config.programs.direnv;
+  trustedPath = lib.makeBinPath cfg.wrap.trustedPackages;
+  patchedDirenv = pkgs.writeShellApplication {
+    name = "direnv";
+    text = ''
+      if [[ "''${1-}" == "hook" ]]; then
+        ${lib.getExe cfg.wrap.direnvPackage} hook "$2" \
+          | ${pkgs.gnused}/bin/sed -E "s#\"${lib.getExe cfg.wrap.direnvPackage}\" export ([^[:space:]\)]+)#PATH=\"\''${SANDIX_PATH:-\$PATH}\" \"${lib.getExe cfg.wrap.direnvPackage}\" export \1 | PATH=\"\''${SANDIX_PATH:-\$PATH}\" ${lib.getExe cfg.wrap.package} wrap --baseline \"\''${SANDIX_BASELINE_PATH:-\$PATH}\" --trusted-path ${lib.escapeShellArg trustedPath}#g"
+      else
+        exec ${lib.getExe cfg.wrap.direnvPackage} "$@"
+      fi
+    '';
+  };
 in
 {
   options.programs.direnv.sandbox = {
@@ -17,15 +30,76 @@ in
     package = lib.mkOption {
       type = lib.types.package;
       default = self.packages.${pkgs.system}.direnv-sandbox;
-      defaultText = lib.literalExpression ''inputs.sandix.packages.${pkgs.system}.direnv-sandbox'';
+      defaultText = lib.literalExpression "inputs.sandix.packages.${pkgs.system}.direnv-sandbox";
       description = ''
         The `direnv-sandbox` wrapper package used for `DIRENV_BASH`.
       '';
+    };
+
+    wrap = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Whether to wrap `programs.direnv.package` with one that pipes
+          `direnv export` through `sandix wrap`.
+        '';
+      };
+
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = self.packages.${pkgs.system}.default;
+        defaultText = lib.literalExpression "inputs.sandix.packages.${pkgs.system}.default";
+        description = ''
+          The `sandix` package providing the `wrap` command.
+        '';
+      };
+
+      direnvPackage = lib.mkOption {
+        type = lib.types.package;
+        default = pkgs.direnv;
+        defaultText = lib.literalExpression "pkgs.direnv";
+        description = ''
+          The real `direnv` package to wrap.
+        '';
+      };
+
+      trustedPackages = lib.mkOption {
+        type = lib.types.listOf lib.types.package;
+        default = [
+          pkgs.coreutils
+          pkgs.gnugrep
+          pkgs.gnused
+          pkgs.findutils
+        ];
+        defaultText = lib.literalExpression "[ pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.findutils ]";
+        description = ''
+          Trusted host shell tools to prepend to the interactive PATH only.
+          These tools are not added to `SANDIX_PATH` for sandboxed child
+          processes.
+        '';
+      };
     };
   };
 
   config = lib.mkIf cfg.enable {
     environment.etc."direnv-sandbox".source = lib.getExe cfg.package;
     environment.variables.DIRENV_BASH = "/etc/direnv-sandbox";
+
+    programs.direnv.package = lib.mkIf (cfg.wrap.enable && direnvCfg.enable) (
+      lib.mkForce patchedDirenv
+    );
+
+    systemd.user.services.sandix-fuse = lib.mkIf cfg.wrap.enable {
+      description = "sandix FUSE daemon";
+      documentation = [ "https://github.com/lorenzbischof/sandix" ];
+      wantedBy = [ "default.target" ];
+
+      serviceConfig = {
+        Environment = "PATH=/run/wrappers/bin";
+        ExecStart = "${lib.getExe cfg.wrap.package} fuse";
+        Restart = "on-failure";
+      };
+    };
   };
 }

@@ -19,7 +19,7 @@ const nixStorePath = "/nix/store"
 // so the tree is: RootNode → StoreEntryNode → BinDirNode → WrapperFileNode.
 type RootNode struct {
 	gofuse.Inode
-	LandrunPath string
+	SandboxExecPath string
 }
 
 var _ gofuse.NodeLookuper = (*RootNode)(nil)
@@ -32,8 +32,8 @@ func (r *RootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 	}
 	out.FromStat(&st)
 	child := r.NewPersistentInode(ctx, &StoreEntryNode{
-		storeName:   name,
-		landrunPath: r.LandrunPath,
+		storeName:       name,
+		sandboxExecPath: r.SandboxExecPath,
 	}, gofuse.StableAttr{Mode: syscall.S_IFDIR})
 	return child, 0
 }
@@ -41,8 +41,8 @@ func (r *RootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 // StoreEntryNode represents a store path directory. Only bin/ is exposed.
 type StoreEntryNode struct {
 	gofuse.Inode
-	storeName   string
-	landrunPath string
+	storeName       string
+	sandboxExecPath string
 }
 
 var _ gofuse.NodeLookuper = (*StoreEntryNode)(nil)
@@ -53,18 +53,18 @@ func (n *StoreEntryNode) Lookup(ctx context.Context, name string, out *fuse.Entr
 	}
 
 	child := n.NewPersistentInode(ctx, &BinDirNode{
-		storeName:   n.storeName,
-		landrunPath: n.landrunPath,
+		storeName:       n.storeName,
+		sandboxExecPath: n.sandboxExecPath,
 	}, gofuse.StableAttr{Mode: syscall.S_IFDIR})
 	return child, 0
 }
 
 // BinDirNode represents a bin/ directory inside a store path.
-// Serves landrun wrapper scripts instead of real binaries.
+// Serves sandbox-exec wrapper scripts instead of real binaries.
 type BinDirNode struct {
 	gofuse.Inode
-	storeName   string
-	landrunPath string
+	storeName       string
+	sandboxExecPath string
 }
 
 var _ gofuse.NodeLookuper = (*BinDirNode)(nil)
@@ -75,7 +75,7 @@ func (n *BinDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut
 	if _, err := os.Lstat(realBin); err != nil {
 		return nil, gofuse.ToErrno(err)
 	}
-	content := wrapper.Generate(n.storeName, name, n.landrunPath)
+	content := wrapper.Generate(n.storeName, name, n.sandboxExecPath)
 	child := n.NewPersistentInode(ctx, &WrapperFileNode{
 		content: content,
 	}, gofuse.StableAttr{Mode: syscall.S_IFREG})
@@ -86,7 +86,7 @@ func (n *BinDirNode) Readdir(ctx context.Context) (gofuse.DirStream, syscall.Err
 	return gofuse.NewLoopbackDirStream(filepath.Join(nixStorePath, n.storeName, "bin"))
 }
 
-// WrapperFileNode represents a single landrun wrapper script.
+// WrapperFileNode represents a single sandbox-exec wrapper script.
 type WrapperFileNode struct {
 	gofuse.Inode
 	content []byte
