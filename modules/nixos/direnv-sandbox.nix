@@ -14,7 +14,7 @@ let
     text = ''
       if [[ "''${1-}" == "hook" ]]; then
         ${lib.getExe cfg.wrap.direnvPackage} hook "$2" \
-          | ${pkgs.gnused}/bin/sed -E "s#\"${lib.getExe cfg.wrap.direnvPackage}\" export ([^[:space:]\)]+)#PATH=\"\''${SANDIX_PATH:-\$PATH}\" \"${lib.getExe cfg.wrap.direnvPackage}\" export \1 | PATH=\"\''${SANDIX_PATH:-\$PATH}\" ${lib.getExe cfg.wrap.package} wrap --baseline \"\''${SANDIX_BASELINE_PATH:-\$PATH}\" --trusted-path ${lib.escapeShellArg trustedPath}#g"
+          | ${pkgs.gnused}/bin/sed -E "s#\"${lib.getExe cfg.wrap.direnvPackage}\" export ([^[:space:]\)]+)#\"${lib.getExe cfg.wrap.direnvPackage}\" export \1 | ${lib.getExe cfg.wrap.package} wrap --trusted-path ${lib.escapeShellArg trustedPath}#g"
       else
         exec ${lib.getExe cfg.wrap.direnvPackage} "$@"
       fi
@@ -75,7 +75,7 @@ in
         defaultText = lib.literalExpression "[ pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.findutils ]";
         description = ''
           Trusted host shell tools to prepend to the interactive PATH only.
-          These tools are not added to `SANDIX_PATH` for sandboxed child
+          These tools are not added to sandboxed child
           processes.
         '';
       };

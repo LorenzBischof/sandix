@@ -1,1 +1,1 @@
-exec sandbox-exec bash "$@"
+exec sandix direnv-bash "$@"

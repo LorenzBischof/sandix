@@ -1,5 +1,6 @@
 {
   pkgs ? import <nixpkgs> { },
+  sandix,
   direnv-sandbox,
   direnv-sandbox-module,
 }:
@@ -58,9 +59,23 @@ pkgs.testers.runNixOSTest {
     machine.succeed(
         "su - testuser -c 'cat > ~/test-project/.envrc << \"EOF\"\n"
         "export SSH_KEY_CONTENT=\"$(cat ~/.ssh/id_ed25519 2>/dev/null || true)\"\n"
+        "export PROJECT_ONLY=\"from-envrc\"\n"
+        "export PATH=\"${pkgs.writeShellScriptBin "project-env-printer" ''
+          printf "%s|%s" "$PROJECT_ONLY" "$HOST_ONLY"
+        ''}/bin:$PATH\"\n"
         "EOF'"
     )
     machine.succeed("su - testuser -c 'cd ~/test-project && direnv allow .'")
+    machine.succeed("su - testuser -c 'mkdir -p ~/test-project/nested-project'")
+    machine.succeed(
+        "su - testuser -c 'cat > ~/test-project/nested-project/.envrc << \"EOF\"\n"
+        "export PROJECT_ONLY=\"from-nested-envrc\"\n"
+        "export PATH=\"${pkgs.writeShellScriptBin "nested-env-printer" ''
+          printf "%s|%s" "$PROJECT_ONLY" "$HOST_ONLY"
+        ''}/bin:$PATH\"\n"
+        "EOF'"
+    )
+    machine.succeed("su - testuser -c 'cd ~/test-project/nested-project && direnv allow .'")
 
     result = machine.succeed(
         "su - testuser -c 'cd ~/test-project && unset DIRENV_BASH && eval \"$(direnv export bash)\" && echo SSH_KEY_CONTENT=$SSH_KEY_CONTENT'"
@@ -82,5 +97,54 @@ pkgs.testers.runNixOSTest {
         "su - testuser -c 'cd ~/test-project && eval \"$(direnv export bash)\" && echo SSH_KEY_CONTENT=$SSH_KEY_CONTENT'"
     ).strip()
     assert "SSH_KEY_CONTENT=" in result, f"Expected sandboxed direnv to block ~/.ssh, got: {result}"
+
+    result = machine.succeed(
+        "su - testuser -c 'cd ~/test-project && export HOST_ONLY=from-host && "
+        "eval \"$(direnv export bash)\" && printf \"%s|%s\" \"$HOST_ONLY\" \"$PROJECT_ONLY\"'"
+    ).strip()
+    assert result == "from-host|from-envrc", (
+        f"Expected interactive shell to keep host vars and add project vars, got: {result}"
+    )
+
+    sandbox_exec = "${pkgs.lib.getExe sandix} exec ${pkgs.bash}/bin/bash -c"
+    wrapped_export = "direnv export bash | ${pkgs.lib.getExe sandix} wrap --mount-point /sandix-test"
+
+    result = machine.succeed(
+        "su - testuser -c 'cd ~/test-project && export HOST_ONLY=from-host && "
+        "eval \"$(direnv export bash)\" && "
+        + sandbox_exec
+        + " \"printf \\\"%s|%s\\\" \\\"\\$PROJECT_ONLY\\\" \\\"\\$HOST_ONLY\\\"\"'"
+    ).strip()
+    assert result == "from-envrc|", (
+        f"Expected sandboxed commands to receive project overlay but not host-only vars, got: {result}"
+    )
+
+    result = machine.succeed(
+        "su - testuser -c 'export HOST_ONLY=from-host && "
+        "cd ~/test-project && eval \"$(direnv export bash)\" && "
+        "cd ~/test-project/nested-project && eval \"$(direnv export bash)\" && "
+        + sandbox_exec
+        + " \"printf \\\"%s|%s\\\" \\\"\\$PROJECT_ONLY\\\" \\\"\\$HOST_ONLY\\\"\"'"
+    ).strip()
+    assert result == "from-nested-envrc|", (
+        f"Expected nested direnv to use the current DIRENV_DIFF without leaking host vars, got: {result}"
+    )
+
+    result = machine.succeed(
+        "su - testuser -c 'cd ~/test-project && eval \"$("
+        + wrapped_export
+        + ")\" && "
+        "cd ~/test-project/nested-project && eval \"$("
+        + wrapped_export
+        + ")\" && "
+        "cd .. && eval \"$("
+        + wrapped_export
+        + ")\" && "
+        "case \"$PATH\" in *project-env-printer*) ;; *) printf missing-parent ;; esac && "
+        "case \"$PATH\" in *nested-env-printer*) printf leak; ;; *) printf ok; ;; esac'"
+    ).strip()
+    assert result == "ok", (
+        f"Expected unloading nested direnv to remove the nested PATH entry while keeping the parent PATH, got: {result}"
+    )
   '';
 }

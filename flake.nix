@@ -38,25 +38,15 @@
             nativeBuildInputs = [ pkgs.makeWrapper ];
             postInstall = ''
               wrapProgram $out/bin/sandix \
-                --prefix PATH : ${pkgs.lib.makeBinPath [ sandbox-exec ]}
+                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.landrun ]}
             '';
             meta.mainProgram = "sandix";
-          };
-
-          sandbox-exec = pkgs.writeShellApplication {
-            name = "sandbox-exec";
-            runtimeInputs = [
-              pkgs.bash
-              pkgs.landrun
-            ];
-            text = builtins.readFile ./scripts/sandbox-exec;
           };
 
           direnv-sandbox = pkgs.writeShellApplication {
             name = "direnv-sandbox";
             runtimeInputs = [
-              pkgs.bash
-              sandbox-exec
+              default
             ];
             text = builtins.readFile ./scripts/direnv-sandbox;
           };
@@ -71,6 +61,7 @@
         {
           direnv-sandbox = import ./tests/direnv-sandbox.nix {
             inherit pkgs;
+            sandix = self.packages.${system}.default;
             direnv-sandbox = self.packages.${system}.direnv-sandbox;
             direnv-sandbox-module = self.nixosModules.direnv-sandbox;
           };
