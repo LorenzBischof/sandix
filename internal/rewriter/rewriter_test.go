@@ -5,66 +5,43 @@ import (
 	"testing"
 )
 
-func TestRewritePathRewritesStoreEntries(t *testing.T) {
-	pathValue := "/nix/store/project-gcc/bin:/nix/store/system-coreutils/bin:/usr/bin:/bin"
-
-	got := RewritePath(pathValue, "/run/user/1000/sandix-store")
-	want := "/run/user/1000/sandix-store/project-gcc/bin:/run/user/1000/sandix-store/system-coreutils/bin:/usr/bin:/bin"
-
-	if got != want {
-		t.Fatalf("RewritePath() = %q, want %q", got, want)
-	}
-}
-
-func TestRewritePathPreservesNonStoreEntries(t *testing.T) {
-	got := RewritePath("/home/me/bin:/usr/bin", "/sandix")
-	if got != "/home/me/bin:/usr/bin" {
-		t.Fatalf("RewritePath() = %q", got)
-	}
-}
-
-func TestRewritePathPreservesEmptyEntries(t *testing.T) {
-	got := RewritePath(":/nix/store/project/bin:", "/sandix")
-	want := ":/sandix/project/bin:"
-	if got != want {
-		t.Fatalf("RewritePath() = %q, want %q", got, want)
-	}
-}
-
 func TestAppendPathRewritePreservesInput(t *testing.T) {
 	input := []byte("export FOO='bar';")
 
-	got := string(AppendPathRewrite(input, "/sandix", "/bin/sandix", ""))
+	got := string(AppendPathRewrite(input, "/bin/sandix", ""))
 
 	if !strings.HasPrefix(got, "export FOO='bar';\n") {
 		t.Fatalf("AppendPathRewrite() should preserve original script, got %q", got)
 	}
-	if !strings.Contains(got, "'/bin/sandix' direnv-path --mount-point '/sandix'") {
-		t.Fatalf("AppendPathRewrite() should append sandix direnv-path command, got %q", got)
+	if !strings.Contains(got, "'/bin/sandix' rewrite-direnv") {
+		t.Fatalf("AppendPathRewrite() should append sandix rewrite-direnv command, got %q", got)
 	}
-	if !strings.Contains(got, "export PATH\n") {
-		t.Fatalf("AppendPathRewrite() should export rewritten PATH, got %q", got)
+	if !strings.Contains(got, "eval \"$__sandix_rewrite\"") {
+		t.Fatalf("AppendPathRewrite() should eval rewritten environment, got %q", got)
+	}
+	if !strings.Contains(got, "return \"$__sandix_status\"") {
+		t.Fatalf("AppendPathRewrite() should propagate rewrite failures, got %q", got)
 	}
 }
 
 func TestAppendPathRewriteQuotesShellValues(t *testing.T) {
-	got := string(AppendPathRewrite([]byte("export FOO=bar\n"), "/sandix ' mount", "/bin/sandix", ""))
+	got := string(AppendPathRewrite([]byte("export FOO=bar\n"), "/bin/sandix ' path", ""))
 
-	if !strings.Contains(got, "'/sandix '\"'\"' mount'") {
-		t.Fatalf("mount point was not shell quoted correctly: %q", got)
+	if !strings.Contains(got, "'/bin/sandix '\"'\"' path'") {
+		t.Fatalf("sandix path was not shell quoted correctly: %q", got)
 	}
 }
 
-func TestAppendPathRewritePrependsTrustedPathOnlyOutsideSandbox(t *testing.T) {
-	got := string(AppendPathRewrite([]byte("export FOO=bar\n"), "/sandix", "/bin/sandix", "/trusted/bin"))
+func TestAppendPathRewritePassesTrustedPackageNames(t *testing.T) {
+	got := string(AppendPathRewrite([]byte("export FOO=bar\n"), "/bin/sandix", "coreutils,gnugrep"))
 
-	if !strings.Contains(got, "PATH='/trusted/bin':\"$PATH\"") {
-		t.Fatalf("AppendPathRewrite() should prepend trusted path interactively, got %q", got)
+	if !strings.Contains(got, "'/bin/sandix' rewrite-direnv --trusted-package-names 'coreutils,gnugrep'") {
+		t.Fatalf("AppendPathRewrite() should pass trusted package names to rewrite-direnv, got %q", got)
 	}
 }
 
 func TestAppendPathRewriteSkipsEmptyInput(t *testing.T) {
-	got := AppendPathRewrite(nil, "/sandix", "/bin/sandix", "/trusted/bin")
+	got := AppendPathRewrite(nil, "/bin/sandix", "/bin/trusted")
 
 	if len(got) != 0 {
 		t.Fatalf("AppendPathRewrite() should not emit a rewrite for empty input, got %q", got)

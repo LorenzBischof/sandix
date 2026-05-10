@@ -8,18 +8,51 @@
 let
   cfg = config.programs.direnv.sandbox;
   direnvCfg = config.programs.direnv;
-  trustedPath = lib.makeBinPath cfg.wrap.trustedPackages;
-  patchedDirenv = pkgs.writeShellApplication {
-    name = "direnv";
-    text = ''
+  trustedPackageNames = lib.concatStringsSep "," cfg.wrap.trustedPackageNames;
+  supportedHookShells = [
+    "bash"
+    "elvish"
+    "fish"
+    "murex"
+    "tcsh"
+    "zsh"
+  ];
+  patchedHooks = pkgs.runCommand "sandix-direnv-hooks" { } ''
+    set -eu
+
+    mkdir -p "$out"
+    patch_hook() {
+      shell="$1"
+      hook="$out/$shell"
+      ${lib.getExe cfg.wrap.direnvPackage} hook "$shell" \
+        | ${pkgs.gnused}/bin/sed -E \
+          -e "s#\"${lib.getExe cfg.wrap.direnvPackage}\" export ([^[:space:]\)]+)#${lib.getExe cfg.wrap.package} direnv-export --trusted-package-names ${lib.escapeShellArg trustedPackageNames} \1#g" \
+          -e "s#${lib.getExe cfg.wrap.direnvPackage} export ([^[:space:]\`]+)#${lib.getExe cfg.wrap.package} direnv-export --trusted-package-names ${lib.escapeShellArg trustedPackageNames} \1#g" \
+        > "$hook"
+
+      if ! ${pkgs.gnugrep}/bin/grep -Fq "${lib.getExe cfg.wrap.package} direnv-export" "$hook"; then
+        echo "failed to patch direnv hook for $shell" >&2
+        exit 1
+      fi
+      if ${pkgs.gnugrep}/bin/grep -Fq '"${lib.getExe cfg.wrap.direnvPackage}" export' "$hook" \
+        || ${pkgs.gnugrep}/bin/grep -Fq "${lib.getExe cfg.wrap.direnvPackage} export" "$hook"; then
+        echo "direnv hook for $shell still contains an unpatched direnv export call" >&2
+        exit 1
+      fi
+    }
+
+    ${lib.concatMapStringsSep "\n" (shell: "patch_hook ${lib.escapeShellArg shell}") supportedHookShells}
+  '';
+  patchedDirenv = pkgs.writeShellScriptBin "direnv" ''
       if [[ "''${1-}" == "hook" ]]; then
-        ${lib.getExe cfg.wrap.direnvPackage} hook "$2" \
-          | ${pkgs.gnused}/bin/sed -E "s#\"${lib.getExe cfg.wrap.direnvPackage}\" export ([^[:space:]\)]+)#\"${lib.getExe cfg.wrap.direnvPackage}\" export \1 | ${lib.getExe cfg.wrap.package} wrap --trusted-path ${lib.escapeShellArg trustedPath}#g"
+        case "''${2-}" in
+          ${lib.concatMapStringsSep "\n          " (shell: "${shell}) cat ${patchedHooks}/${shell} ;;") supportedHookShells}
+          *) echo "unsupported direnv hook shell: ''${2-}" >&2; exit 1 ;;
+        esac
       else
         exec ${lib.getExe cfg.wrap.direnvPackage} "$@"
       fi
-    '';
-  };
+  '';
 in
 {
   options.programs.direnv.sandbox = {
@@ -41,8 +74,8 @@ in
         type = lib.types.bool;
         default = true;
         description = ''
-          Whether to wrap `programs.direnv.package` with one that pipes
-          `direnv export` through `sandix wrap`.
+          Whether to wrap `programs.direnv.package` with one that runs
+          `direnv export` through `sandix direnv-export`.
         '';
       };
 
@@ -64,19 +97,23 @@ in
         '';
       };
 
-      trustedPackages = lib.mkOption {
-        type = lib.types.listOf lib.types.package;
+      trustedPackageNames = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
         default = [
-          pkgs.coreutils
-          pkgs.gnugrep
-          pkgs.gnused
-          pkgs.findutils
+          "coreutils"
+          "gnugrep"
+          "gnused"
+          "findutils"
         ];
-        defaultText = lib.literalExpression "[ pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.findutils ]";
+        defaultText = lib.literalExpression ''[ "coreutils" "gnugrep" "gnused" "findutils" ]'';
         description = ''
-          Trusted host shell tools to prepend to the interactive PATH only.
-          These tools are not added to sandboxed child
-          processes.
+          Package names that may remain unwrapped in the interactive PATH when
+          their concrete devshell store paths verify against the official
+          cache.nixos.org signing key.
+
+          These names are matched against the package name parsed from each
+          devshell PATH entry's store path. If signature verification fails, the
+          PATH entry is wrapped like any other devshell package.
         '';
       };
     };
@@ -89,17 +126,5 @@ in
     programs.direnv.package = lib.mkIf (cfg.wrap.enable && direnvCfg.enable) (
       lib.mkForce patchedDirenv
     );
-
-    systemd.user.services.sandix-fuse = lib.mkIf cfg.wrap.enable {
-      description = "sandix FUSE daemon";
-      documentation = [ "https://github.com/lorenzbischof/sandix" ];
-      wantedBy = [ "default.target" ];
-
-      serviceConfig = {
-        Environment = "PATH=/run/wrappers/bin";
-        ExecStart = "${lib.getExe cfg.wrap.package} fuse";
-        Restart = "on-failure";
-      };
-    };
   };
 }

@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"encoding/base64"
+	"testing"
+)
 
 func TestDiffEnvComputesOverlayFromSandboxInput(t *testing.T) {
 	before := map[string]string{
@@ -62,8 +65,8 @@ func TestApplyOverlayPreservesHostOnlyVars(t *testing.T) {
 	}
 }
 
-func TestSandboxInputUsesPath(t *testing.T) {
-	got := sandboxInputEnv(map[string]string{
+func TestBaseSandboxEnvUsesPath(t *testing.T) {
+	got := baseSandboxEnv(map[string]string{
 		"PATH":      "/devshell/bin",
 		"HOST_ONLY": "not-forwarded",
 		"HOME":      "/home/me",
@@ -80,15 +83,16 @@ func TestSandboxInputUsesPath(t *testing.T) {
 	}
 }
 
-func TestDirenvBashInputUsesPreviousDirenvPath(t *testing.T) {
-	got := direnvBashInputEnv(
+func TestDirenvEvaluatorEnvUsesPreviousDirenvEnv(t *testing.T) {
+	got := direnvEvaluatorEnv(
 		map[string]string{
 			"PATH":      "/run/user/1000/sandix/store/inner/bin:/bin",
 			"HOST_ONLY": "not-forwarded",
 		},
 		direnvDiff{
 			Previous: map[string]string{
-				"PATH": "/nix/store/parent/bin:/bin",
+				"PATH":         "/nix/store/parent/bin:/bin",
+				"PROJECT_ONLY": "from-parent",
 			},
 			Next: map[string]string{
 				"PATH": "/nix/store/inner/bin:/bin",
@@ -103,10 +107,13 @@ func TestDirenvBashInputUsesPreviousDirenvPath(t *testing.T) {
 	if _, ok := got["HOST_ONLY"]; ok {
 		t.Fatalf("host-only variable should not be in reduced sandbox input")
 	}
+	if got["PROJECT_ONLY"] != "from-parent" {
+		t.Fatalf("expected previous direnv variables in sandbox input, got %q", got["PROJECT_ONLY"])
+	}
 }
 
-func TestRemovedDirenvKeysIncludesForwardedHostVars(t *testing.T) {
-	got := removedDirenvKeys(direnvDiff{
+func TestDirenvUnsetKeysIncludesForwardedHostVars(t *testing.T) {
+	got := direnvUnsetKeys(direnvDiff{
 		Previous: map[string]string{
 			"NIX_PATH":        "host",
 			"NIX_REMOTE":      "daemon",
@@ -130,5 +137,47 @@ func TestRemovedDirenvKeysIncludesForwardedHostVars(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("expected removed keys %#v, got %#v", want, got)
 		}
+	}
+}
+
+func TestEncodeDirenvDiffRoundTripsThroughReader(t *testing.T) {
+	want := direnvDiff{
+		Previous: map[string]string{
+			"PATH": "/nix/store/old/bin:/bin",
+			"FOO":  "old",
+		},
+		Next: map[string]string{
+			"PATH": "/nix/store/new-wrapper/bin:/nix/store/old/bin",
+			"FOO":  "new",
+		},
+	}
+
+	encoded, err := encodeDirenvDiff(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := base64.URLEncoding.DecodeString(encoded); err != nil {
+		t.Fatalf("encoded DIRENV_DIFF should use padded URL base64: %v", err)
+	}
+	t.Setenv("DIRENV_DIFF", encoded)
+
+	got, ok, err := readDirenvDiff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatalf("expected DIRENV_DIFF to be read")
+	}
+	if got.Previous["PATH"] != want.Previous["PATH"] || got.Next["PATH"] != want.Next["PATH"] || got.Next["FOO"] != want.Next["FOO"] {
+		t.Fatalf("readDirenvDiff() = %#v, want %#v", got, want)
+	}
+}
+
+func TestDirenvDiffIsActiveRequiresNextDirenvDir(t *testing.T) {
+	if !direnvDiffIsActive(direnvDiff{Next: map[string]string{"DIRENV_DIR": "-/tmp/project"}}) {
+		t.Fatalf("expected diff with next DIRENV_DIR to be active")
+	}
+	if direnvDiffIsActive(direnvDiff{Next: map[string]string{"PATH": "/usr/bin"}}) {
+		t.Fatalf("expected diff without next DIRENV_DIR to be inactive")
 	}
 }

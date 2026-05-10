@@ -89,10 +89,6 @@ pkgs.testers.runNixOSTest {
         f"Expected DIRENV_BASH to point to the stable managed symlink, got: {result}"
     )
 
-    machine.succeed("test -e /etc/systemd/user/sandix-fuse.service")
-    machine.succeed("grep -F 'ExecStart=' /etc/systemd/user/sandix-fuse.service | grep -F 'sandix fuse'")
-    machine.succeed("grep -F 'Environment=' /etc/systemd/user/sandix-fuse.service | grep -F '/run/wrappers/bin'")
-
     result = machine.succeed(
         "su - testuser -c 'cd ~/test-project && eval \"$(direnv export bash)\" && echo SSH_KEY_CONTENT=$SSH_KEY_CONTENT'"
     ).strip()
@@ -107,7 +103,23 @@ pkgs.testers.runNixOSTest {
     )
 
     sandbox_exec = "${pkgs.lib.getExe sandix} exec ${pkgs.bash}/bin/bash -c"
-    wrapped_export = "direnv export bash | ${pkgs.lib.getExe sandix} wrap --mount-point /sandix-test"
+    wrapped_export = "${pkgs.lib.getExe sandix} direnv-export bash"
+
+    minimal_path = "/run/current-system/sw/bin"
+    result = machine.succeed(
+        "su - testuser -c 'cd /tmp && env -i HOME=/home/testuser USER=testuser PATH="
+        + minimal_path
+        + " ${pkgs.lib.getExe sandix} exec ${pkgs.coreutils}/bin/env'"
+    ).strip()
+    env_items = dict(line.split("=", 1) for line in result.splitlines() if "=" in line)
+    expected_env = {
+        "HOME": "/home/testuser",
+        "PATH": minimal_path,
+        "USER": "testuser",
+    }
+    assert env_items == expected_env, (
+        f"Expected packaged sandix wrapper not to add environment variables or PATH entries, got: {env_items}"
+    )
 
     result = machine.succeed(
         "su - testuser -c 'cd ~/test-project && export HOST_ONLY=from-host && "
@@ -140,8 +152,8 @@ pkgs.testers.runNixOSTest {
         "cd .. && eval \"$("
         + wrapped_export
         + ")\" && "
-        "case \"$PATH\" in *project-env-printer*) ;; *) printf missing-parent ;; esac && "
-        "case \"$PATH\" in *nested-env-printer*) printf leak; ;; *) printf ok; ;; esac'"
+        "project-env-printer >/dev/null || printf missing-parent && "
+        "if command -v nested-env-printer >/dev/null; then printf leak; else printf ok; fi'"
     ).strip()
     assert result == "ok", (
         f"Expected unloading nested direnv to remove the nested PATH entry while keeping the parent PATH, got: {result}"

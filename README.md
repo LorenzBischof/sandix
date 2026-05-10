@@ -9,9 +9,10 @@ of those tools normally gives it the same filesystem access as you, including
 your home directory, local keys, API tokens, and private Git repositories.
 
 Unlike full-shell sandboxes such as [sbox](https://github.com/DavHau/sbox), sandix does not put your whole
-interactive shell in a box. Your prompt, aliases, shell functions, editor
-integration and host commands keep working outside the sandbox; only
-binaries introduced by the devshell are routed through sandbox wrappers.
+interactive shell in a box. Your prompt, aliases, shell functions, and editor
+integration keep working outside the sandbox. While a sandix-rewritten devshell
+is active, inherited host PATH entries keep working and project-added Nix store
+tools are routed through sandbox wrappers.
 
 ## How it works
 
@@ -19,8 +20,8 @@ When you enter a Nix devshell through `direnv`, it adds `/nix/store/<hash>/bin` 
 
 sandix intercepts this at two points:
 
-1. **`sandix wrap`** — a stdin filter that preserves the incoming shell script and appends a post-eval PATH rewrite step. The rewrite step only changes `/nix/store/<hash>/...` PATH entries that were added by the script, leaving pre-existing system PATH entries untouched.
-2. **`sandix fuse`** — a FUSE daemon that serves the rewritten paths. When a binary is executed through the mount, it transparently serves a wrapper script that runs the real binary through `sandix exec`.
+1. **`sandix direnv-export`** — runs `direnv export` and appends a post-eval PATH rewrite step. The rewrite step preserves inherited PATH entries, strips project-added non-store entries, and changes project-added `/nix/store/<hash>/...` PATH entries to sandbox wrappers.
+2. **Nix-built command wrappers** — `sandix rewrite-direnv` asks the system `nix` to build wrapper derivations for those PATH entries. The wrappers run the real binaries through `sandix exec`.
 3. **`direnv-sandbox`** — a small standalone `DIRENV_BASH` wrapper that runs direnv's `.envrc` evaluation bash process through `sandix exec`.
 
 ## Trust boundary
@@ -34,25 +35,16 @@ direnv
 landrun
 ```
 
-Flake code and `.envrc` are hostile data sources. sandix leaves their shell output intact, then rewrites the resulting PATH before the hook returns control to the interactive shell.
+Flake code and `.envrc` are hostile data sources. sandix leaves their shell output intact, then rewrites the resulting PATH before the hook returns control to the interactive shell. Inherited host PATH entries are preserved; non-store entries added by the project are dropped rather than trusted.
 
 ## Usage
-
-### Start the FUSE daemon
-
-```bash
-sandix fuse
-```
-
-Mounts at `$XDG_RUNTIME_DIR/sandix/store` by default. If `XDG_RUNTIME_DIR` is
-unset, falls back to `/run/user/<uid>/sandix/store`. No root required.
 
 ### Sandbox direnv
 
 Use one of the modules below. They wrap `programs.direnv.package` so
-`direnv export` is piped through `sandix wrap`, configure `DIRENV_BASH` to run
-`.envrc` evaluation through `sandix exec`, and install a `sandix-fuse`
-systemd service.
+`direnv export` runs through `sandix direnv-export`, configure `DIRENV_BASH` to run
+`.envrc` evaluation through `sandix exec`, and use the system `nix` to build
+wrapper derivations for devshell PATH entries.
 
 ## Landrun sandbox profile
 
@@ -104,7 +96,7 @@ sandix.homeManagerModules.direnv-sandbox
 
 **Scripts are not sandboxed.** Scripts that are directly executed from the shell are not sandboxed. See [peninsula](https://github.com/LorenzBischof/peninsula) for a possible workaround.
 
-**Only PATH command lookup is rewritten.** Direct execution of `/nix/store/...` paths, aliases, shell functions, and non-PATH variables are not rewritten by `sandix wrap`.
+**Only PATH command lookup is rewritten.** Direct execution of `/nix/store/...` paths, aliases, shell functions, and non-PATH variables are not rewritten by `sandix direnv-export`.
 
 **Sandboxed direnv evaluation has a reduced environment.** `direnv-sandbox` returns the full host environment with the project environment layered on top. Sandboxed binaries reuse direnv's `DIRENV_DIFF` instead of a sandix overlay file. See [Sandboxed direnv Environment Design](docs/sandboxed-direnv-environment.md). Variables outside sandix's reduced evaluator environment are still unavailable while `.envrc` itself is evaluated.
 
@@ -114,9 +106,8 @@ sandix.homeManagerModules.direnv-sandbox
 
 | Binary | Description |
 |---|---|
-| `sandix fuse` | FUSE daemon serving wrapper scripts at the sandboxed store mount |
-| `sandix wrap` | stdin filter appending a post-eval PATH rewrite step |
-| `sandix rewrite` | rewrites one PATH value through the sandboxed store mount |
-| `sandix direnv-path` | rewrites the current direnv PATH from `DIRENV_DIFF` |
+| `sandix direnv-export` | runs `direnv export` and appends a post-eval environment rewrite step |
+| `sandix rewrite-direnv` | rewrites direnv PATH entries and updates `DIRENV_DIFF` to match |
+| `sandix wrap-path` | debug helper that prints the rewritten direnv PATH from `DIRENV_DIFF` |
 | `sandix exec` | wrapper around `landrun` used by generated command wrappers |
 | `direnv-sandbox` | standalone `DIRENV_BASH` wrapper that evaluates `.envrc` through `sandix exec` |

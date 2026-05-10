@@ -11,25 +11,13 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
-	"syscall"
 
-	gofuse "github.com/hanwen/go-fuse/v2/fs"
-	"github.com/hanwen/go-fuse/v2/fuse"
-	sandixfuse "github.com/lorenzbischof/sandix/internal/fuse"
+	"github.com/lorenzbischof/sandix/internal/nixwrap"
 	"github.com/lorenzbischof/sandix/internal/rewriter"
 )
-
-func defaultMountPoint() string {
-	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
-		return filepath.Join(dir, "sandix", "store")
-	}
-	return filepath.Join("/run/user", strconv.Itoa(os.Getuid()), "sandix", "store")
-}
 
 func currentSandixPath() (string, error) {
 	if os.Args[0] != "" {
@@ -43,22 +31,94 @@ func currentSandixPath() (string, error) {
 	return os.Executable()
 }
 
+func currentShellPath() (string, error) {
+	shellPath, err := exec.LookPath("sh")
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(shellPath); err == nil {
+		shellPath = resolved
+	}
+	return shellPath, nil
+}
+
+type trustedFlags struct {
+	bashPath            *string
+	builderPath         *string
+	direnvPath          *string
+	landrunPath         *string
+	nixPath             *string
+	sandixPath          *string
+	shellPath           *string
+	trustedPackageNames *string
+}
+
+func addTrustedFlags(fs *flag.FlagSet) trustedFlags {
+	return trustedFlags{
+		bashPath:            fs.String("bash", "", "trusted bash executable used to evaluate direnv .envrc files"),
+		builderPath:         fs.String("builder", "", "trusted Nix derivation builder used to create command wrappers"),
+		direnvPath:          fs.String("direnv", "direnv", "trusted direnv executable"),
+		landrunPath:         fs.String("landrun", "", "trusted landrun executable"),
+		nixPath:             fs.String("nix", "nix", "trusted system nix executable"),
+		sandixPath:          fs.String("sandix", "", "trusted sandix executable used by generated command wrappers"),
+		shellPath:           fs.String("shell", "", "trusted shell used by Nix wrapper builders and generated wrappers"),
+		trustedPackageNames: fs.String("trusted-package-names", "", "comma-separated package names to leave unwrapped when signed by cache.nixos.org"),
+	}
+}
+
+func (f trustedFlags) require(name string, value *string) {
+	if *value == "" {
+		log.Fatalf("--%s is required", name)
+	}
+}
+
+func (f trustedFlags) resolvedShellPath() string {
+	if *f.shellPath != "" {
+		return *f.shellPath
+	}
+	shellPath, err := currentShellPath()
+	if err != nil {
+		log.Fatalf("Failed to resolve shell path: %v", err)
+	}
+	return shellPath
+}
+
+func (f trustedFlags) resolvedSandixPath() string {
+	if *f.sandixPath != "" {
+		return *f.sandixPath
+	}
+	sandixPath, err := currentSandixPath()
+	if err != nil {
+		log.Fatalf("Failed to resolve sandix path: %v", err)
+	}
+	return sandixPath
+}
+
+func (f trustedFlags) resolvedBashPath() string {
+	if *f.bashPath != "" {
+		return *f.bashPath
+	}
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		log.Fatalf("bash not found in PATH: %v", err)
+	}
+	return bashPath
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, "Usage: sandix <command> [args]\n")
-		fmt.Fprintf(os.Stderr, "Commands: fuse, wrap, rewrite, direnv-path, direnv-bash, exec\n")
+		fmt.Fprintf(os.Stderr, "Commands: rewrite-direnv, wrap-path, direnv-export, direnv-bash, exec\n")
 		os.Exit(1)
 	}
 
 	switch os.Args[1] {
-	case "fuse":
-		cmdFuse(os.Args[2:])
-	case "wrap":
-		cmdWrap(os.Args[2:])
-	case "rewrite":
-		cmdRewrite(os.Args[2:])
-	case "direnv-path":
-		cmdDirenvPath(os.Args[2:])
+	case "rewrite-direnv":
+		cmdRewriteDirenv(os.Args[2:])
+	case "wrap-path":
+		cmdWrapPath(os.Args[2:])
+	case "direnv-export":
+		cmdDirenvExport(os.Args[2:])
 	case "direnv-bash":
 		cmdDirenvBash(os.Args[2:])
 	case "exec":
@@ -80,24 +140,27 @@ type direnvDiff struct {
 }
 
 func cmdDirenvBash(args []string) {
+	fs := flag.NewFlagSet("direnv-bash", flag.ExitOnError)
+	trusted := addTrustedFlags(fs)
+	fs.Parse(args)
+	trusted.require("landrun", trusted.landrunPath)
+
 	hostEnv := envMap(os.Environ())
 	currentDiff, currentDiffOK, err := readDirenvDiff()
 	if err != nil {
 		log.Fatalf("failed to decode DIRENV_DIFF: %v", err)
 	}
-	sandboxInput := direnvBashInputEnv(hostEnv, currentDiff, currentDiffOK)
+	evaluatorEnv := direnvEvaluatorEnv(hostEnv, currentDiff, currentDiffOK)
 
-	sandixPath, err := currentSandixPath()
-	if err != nil {
-		log.Fatalf("Failed to resolve sandix path: %v", err)
-	}
-	bashPath, err := exec.LookPath("bash")
-	if err != nil {
-		log.Fatalf("bash not found in PATH: %v", err)
-	}
+	bashPath := trusted.resolvedBashPath()
 
-	cmd := exec.Command(sandixPath, append([]string{"exec", bashPath}, args...)...)
-	cmd.Env = append(envList(hostEnv), "SANDIX_DIRENV_EVAL=1")
+	landrunEnv := copyEnv(hostEnv)
+	if currentDiffOK {
+		for _, key := range direnvUnsetKeys(currentDiff) {
+			delete(landrunEnv, key)
+		}
+	}
+	cmd := sandboxCommand(*trusted.landrunPath, landrunEnv, evaluatorEnv, append([]string{bashPath}, fs.Args()...))
 	cmd.Stdin = os.Stdin
 	cmd.Stderr = os.Stderr
 
@@ -117,7 +180,7 @@ func cmdDirenvBash(args []string) {
 		os.Exit(exitCode)
 	}
 
-	overlay := diffEnv(sandboxInput, sandboxResult)
+	overlay := diffEnv(evaluatorEnv, sandboxResult)
 	interactiveResult := applyOverlay(hostEnv, overlay)
 
 	encoded, err := json.Marshal(interactiveResult)
@@ -128,7 +191,7 @@ func cmdDirenvBash(args []string) {
 	os.Exit(exitCode)
 }
 
-func sandboxInputEnv(hostEnv map[string]string) map[string]string {
+func baseSandboxEnv(hostEnv map[string]string) map[string]string {
 	keys := []string{
 		"HOME",
 		"USER",
@@ -159,13 +222,13 @@ func sandboxInputEnv(hostEnv map[string]string) map[string]string {
 	return reduced
 }
 
-func direnvBashInputEnv(hostEnv map[string]string, diff direnvDiff, diffOK bool) map[string]string {
-	input := sandboxInputEnv(hostEnv)
+func direnvEvaluatorEnv(hostEnv map[string]string, diff direnvDiff, diffOK bool) map[string]string {
+	input := baseSandboxEnv(hostEnv)
 	if !diffOK {
 		return input
 	}
-	if direnvPath, exists := diff.Previous["PATH"]; exists {
-		input["PATH"] = direnvPath
+	for key, value := range diff.Previous {
+		input[key] = value
 	}
 	return input
 }
@@ -191,10 +254,7 @@ func diffEnv(before, after map[string]string) envOverlay {
 }
 
 func applyOverlay(base map[string]string, overlay envOverlay) map[string]string {
-	result := make(map[string]string, len(base)+len(overlay.Set))
-	for key, value := range base {
-		result[key] = value
-	}
+	result := copyEnv(base)
 	for _, key := range overlay.Unset {
 		delete(result, key)
 	}
@@ -202,6 +262,14 @@ func applyOverlay(base map[string]string, overlay envOverlay) map[string]string 
 		result[key] = value
 	}
 	return result
+}
+
+func copyEnv(env map[string]string) map[string]string {
+	copied := make(map[string]string, len(env))
+	for key, value := range env {
+		copied[key] = value
+	}
+	return copied
 }
 
 func readDirenvDiff() (direnvDiff, bool, error) {
@@ -242,7 +310,25 @@ func readDirenvDiff() (direnvDiff, bool, error) {
 	return diff, true, nil
 }
 
-func removedDirenvKeys(diff direnvDiff) []string {
+func encodeDirenvDiff(diff direnvDiff) (string, error) {
+	encodedJSON, err := json.Marshal(diff)
+	if err != nil {
+		return "", err
+	}
+
+	var compressed bytes.Buffer
+	writer := zlib.NewWriter(&compressed)
+	if _, err := writer.Write(encodedJSON); err != nil {
+		writer.Close()
+		return "", err
+	}
+	if err := writer.Close(); err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(compressed.Bytes()), nil
+}
+
+func direnvUnsetKeys(diff direnvDiff) []string {
 	keys := make([]string, 0)
 	for key := range diff.Previous {
 		if key == "PATH" {
@@ -277,160 +363,149 @@ func envList(env map[string]string) []string {
 	return items
 }
 
-func cmdFuse(args []string) {
-	fs := flag.NewFlagSet("fuse", flag.ExitOnError)
-	mountPoint := fs.String("mount-point", defaultMountPoint(), "FUSE mount point")
-	debug := fs.Bool("debug", false, "enable FUSE debug logging")
+func cmdDirenvExport(args []string) {
+	fs := flag.NewFlagSet("direnv-export", flag.ExitOnError)
+	trusted := addTrustedFlags(fs)
 	fs.Parse(args)
-
-	if err := os.MkdirAll(*mountPoint, 0755); err != nil {
-		log.Fatalf("Failed to create mount point %s: %v", *mountPoint, err)
+	if fs.NArg() == 0 {
+		log.Fatalf("Usage: sandix direnv-export [trusted flags] SHELL")
 	}
 
-	sandixPath, err := currentSandixPath()
+	cmd := exec.Command(*trusted.direnvPath, append([]string{"export"}, fs.Args()...)...)
+	cmd.Stderr = os.Stderr
+	output, err := cmd.Output()
 	if err != nil {
-		log.Fatalf("Failed to resolve sandix path: %v", err)
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			_, _ = os.Stdout.Write(exitErr.Stderr)
+			os.Exit(exitErr.ExitCode())
+		}
+		log.Fatalf("direnv export failed: %v", err)
 	}
 
-	root := &sandixfuse.RootNode{SandixPath: sandixPath}
-	server, err := gofuse.Mount(*mountPoint, root, &gofuse.Options{
-		MountOptions: fuse.MountOptions{
-			Debug:      *debug,
-			AllowOther: false,
-			FsName:     "sandix",
-			Name:       "sandix",
-		},
-	})
-	if err != nil {
-		log.Fatalf("Mount failed: %v", err)
-	}
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		server.Unmount()
-	}()
-
-	log.Printf("Serving sandboxed store at %s", *mountPoint)
-	server.Wait()
+	sandixPath := trusted.resolvedSandixPath()
+	rewritten := rewriter.AppendPathRewrite(output, sandixPath, *trusted.trustedPackageNames)
+	os.Stdout.Write(rewritten)
 }
 
-func cmdWrap(args []string) {
-	fs := flag.NewFlagSet("wrap", flag.ExitOnError)
-	mountPoint := fs.String("mount-point", defaultMountPoint(), "sandboxed store mount point")
-	trustedPath := fs.String("trusted-path", "", "trusted host PATH entries to prepend outside the sandbox")
-	fs.Parse(args)
-
-	input, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		log.Fatalf("Failed to read stdin: %v", err)
-	}
-
-	sandixPath, err := currentSandixPath()
-	if err != nil {
-		log.Fatalf("Failed to resolve sandix path: %v", err)
-	}
-
-	output := rewriter.AppendPathRewrite(input, *mountPoint, sandixPath, *trustedPath)
-	os.Stdout.Write(output)
-}
-
-func cmdRewrite(args []string) {
-	fs := flag.NewFlagSet("rewrite", flag.ExitOnError)
-	mountPoint := fs.String("mount-point", defaultMountPoint(), "sandboxed store mount point")
-	fs.Parse(args)
-
-	pathValue := os.Getenv("PATH")
-	switch fs.NArg() {
-	case 0:
-	case 1:
-		pathValue = fs.Arg(0)
-	default:
-		log.Fatalf("Usage: sandix rewrite [--mount-point PATH] [PATH]")
-	}
-
-	fmt.Print(rewriter.RewritePath(pathValue, *mountPoint))
-}
-
-func cmdDirenvPath(args []string) {
-	fs := flag.NewFlagSet("direnv-path", flag.ExitOnError)
-	mountPoint := fs.String("mount-point", defaultMountPoint(), "sandboxed store mount point")
+func cmdRewriteDirenv(args []string) {
+	fs := flag.NewFlagSet("rewrite-direnv", flag.ExitOnError)
+	trusted := addTrustedFlags(fs)
 	fs.Parse(args)
 	if fs.NArg() != 0 {
-		log.Fatalf("Usage: sandix direnv-path [--mount-point PATH]")
+		log.Fatalf("Usage: sandix rewrite-direnv [trusted flags]")
 	}
 
 	diff, ok, err := readDirenvDiff()
 	if err != nil {
 		log.Fatalf("failed to decode DIRENV_DIFF: %v", err)
 	}
+	if !ok || !direnvDiffIsActive(diff) {
+		return
+	}
+
+	rewrittenPath, err := rewriteDirenvPath(diff, true, trusted)
+	if err != nil {
+		log.Fatalf("failed to rewrite PATH through Nix wrappers: %v", err)
+	}
+
+	fmt.Printf("PATH=%s\n", shellQuote(rewrittenPath))
+	fmt.Print("export PATH\n")
+	diff.Next["PATH"] = rewrittenPath
+	encoded, err := encodeDirenvDiff(diff)
+	if err != nil {
+		log.Fatalf("failed to encode DIRENV_DIFF: %v", err)
+	}
+	fmt.Printf("DIRENV_DIFF=%s\n", shellQuote(encoded))
+	fmt.Print("export DIRENV_DIFF\n")
+}
+
+func direnvDiffIsActive(diff direnvDiff) bool {
+	_, ok := diff.Next["DIRENV_DIR"]
+	return ok
+}
+
+func cmdWrapPath(args []string) {
+	fs := flag.NewFlagSet("wrap-path", flag.ExitOnError)
+	trusted := addTrustedFlags(fs)
+	fs.Parse(args)
+	if fs.NArg() != 0 {
+		log.Fatalf("Usage: sandix wrap-path [trusted flags]")
+	}
+
+	diff, ok, err := readDirenvDiff()
+	if err != nil {
+		log.Fatalf("failed to decode DIRENV_DIFF: %v", err)
+	}
+	rewritten, err := rewriteDirenvPath(diff, ok, trusted)
+	if err != nil {
+		log.Fatalf("failed to rewrite PATH through Nix wrappers: %v", err)
+	}
+	fmt.Print(rewritten)
+}
+
+func rewriteDirenvPath(diff direnvDiff, diffOK bool, trusted trustedFlags) (string, error) {
 	pathValue := os.Getenv("PATH")
-	if ok {
+	previousPath := ""
+	if diffOK {
 		if direnvPath, exists := diff.Next["PATH"]; exists {
 			pathValue = direnvPath
 		}
+		if direnvPath, exists := diff.Previous["PATH"]; exists {
+			previousPath = direnvPath
+		}
 	}
 
-	fmt.Print(rewriter.RewritePath(pathValue, *mountPoint))
+	trusted.require("builder", trusted.builderPath)
+	trusted.require("landrun", trusted.landrunPath)
+	sandixPath := trusted.resolvedSandixPath()
+	shellPath := trusted.resolvedShellPath()
+
+	return nixwrap.RewritePathAdded(pathValue, previousPath, *trusted.nixPath, sandixPath, *trusted.builderPath, *trusted.landrunPath, shellPath, trustedPackageNamesFromFlag(*trusted.trustedPackageNames))
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func trustedPackageNamesFromFlag(value string) []string {
+	var names []string
+	for _, name := range strings.Split(value, ",") {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 func cmdExec(args []string) {
 	fs := flag.NewFlagSet("exec", flag.ExitOnError)
+	trusted := addTrustedFlags(fs)
 	fs.Parse(args)
 	if fs.NArg() == 0 {
-		log.Fatalf("Usage: sandix exec COMMAND [ARGS...]")
+		log.Fatalf("Usage: sandix exec --landrun PATH COMMAND [ARGS...]")
 	}
-
-	landrunPath, err := exec.LookPath("landrun")
-	if err != nil {
-		log.Fatalf("landrun not found in PATH: %v", err)
-	}
+	trusted.require("landrun", trusted.landrunPath)
 
 	landrunEnv := envMap(os.Environ())
-	landrunArgs := make([]string, 0, 64+fs.NArg())
 	diff, ok, err := readDirenvDiff()
 	if err != nil {
 		log.Fatalf("failed to decode DIRENV_DIFF: %v", err)
 	}
 
-	commandPath := os.Getenv("PATH")
-	commandEnv := map[string]string(nil)
+	commandEnv := baseSandboxEnv(landrunEnv)
 	if ok {
 		commandEnv = diff.Next
-		if os.Getenv("SANDIX_DIRENV_EVAL") == "1" {
-			commandEnv = diff.Previous
-		}
-		if direnvPath, exists := commandEnv["PATH"]; exists {
-			commandPath = direnvPath
-		}
 
-		for _, key := range removedDirenvKeys(diff) {
+		for _, key := range direnvUnsetKeys(diff) {
 			delete(landrunEnv, key)
 		}
-
-		keys := make([]string, 0, len(commandEnv))
-		for key := range commandEnv {
-			if key == "PATH" || isBaseSandboxEnvKey(key) {
-				continue
-			}
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			landrunArgs = append(landrunArgs, "--env", key+"="+commandEnv[key])
-		}
 	}
-	delete(landrunEnv, "SANDIX_DIRENV_EVAL")
 
-	addSandboxFilesystemArgs(&landrunArgs)
-	addBaseSandboxEnvArgs(&landrunArgs, commandPath)
-
-	landrunArgs = append(landrunArgs, "--")
-	landrunArgs = append(landrunArgs, fs.Args()...)
-
-	cmd := exec.Command(landrunPath, landrunArgs...)
-	cmd.Env = envList(landrunEnv)
+	cmd := sandboxCommand(*trusted.landrunPath, landrunEnv, commandEnv, fs.Args())
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -440,6 +515,31 @@ func cmdExec(args []string) {
 		}
 		log.Fatalf("landrun failed: %v", err)
 	}
+}
+
+func sandboxCommand(landrunPath string, hostEnv map[string]string, commandEnv map[string]string, commandArgs []string) *exec.Cmd {
+	landrunArgs := make([]string, 0, 64+len(commandArgs))
+	keys := make([]string, 0, len(commandEnv))
+	for key := range commandEnv {
+		if isBaseSandboxEnvKey(key) {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		landrunArgs = append(landrunArgs, "--env", key+"="+commandEnv[key])
+	}
+
+	addSandboxFilesystemArgs(&landrunArgs)
+	addBaseSandboxEnvArgs(&landrunArgs, commandEnv)
+
+	landrunArgs = append(landrunArgs, "--")
+	landrunArgs = append(landrunArgs, commandArgs...)
+
+	cmd := exec.Command(landrunPath, landrunArgs...)
+	cmd.Env = envList(hostEnv)
+	return cmd
 }
 
 func addSandboxFilesystemArgs(args *[]string) {
@@ -496,10 +596,10 @@ func addSandboxFilesystemArgs(args *[]string) {
 	)
 }
 
-func addBaseSandboxEnvArgs(args *[]string, commandPath string) {
+func addBaseSandboxEnvArgs(args *[]string, commandEnv map[string]string) {
 	for _, key := range baseSandboxEnvKeys {
-		if key == "PATH" {
-			*args = append(*args, "--env", "PATH="+commandPath)
+		if value, exists := commandEnv[key]; exists {
+			*args = append(*args, "--env", key+"="+value)
 			continue
 		}
 		*args = append(*args, "--env", key)

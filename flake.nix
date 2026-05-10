@@ -27,29 +27,46 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          wrapperBuilder = pkgs.writeShellScriptBin "sandix-wrapper-builder" ''
+            set -eu
+            export PATH=${pkgs.lib.makeBinPath [ pkgs.coreutils ]}
+            exec ${pkgs.runtimeShell} -eu -c "$BUILD_SCRIPT"
+          '';
         in
         rec {
-          default = pkgs.buildGoModule {
+          sandix-unwrapped = pkgs.buildGoModule {
             pname = "sandix";
             version = "0.1.0";
             src = ./.;
-            vendorHash = "sha256-9e1HDWC5Cw1gbpM0Vs/7k+maxlNvi7fRR+HNFa8DtXs=";
+            vendorHash = null;
             env.CGO_ENABLED = 0;
-            nativeBuildInputs = [ pkgs.makeWrapper ];
-            postInstall = ''
-              wrapProgram $out/bin/sandix \
-                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.landrun ]}
-            '';
             meta.mainProgram = "sandix";
           };
 
-          direnv-sandbox = pkgs.writeShellApplication {
-            name = "direnv-sandbox";
-            runtimeInputs = [
-              default
-            ];
-            text = builtins.readFile ./scripts/direnv-sandbox;
-          };
+          default = pkgs.writeShellScriptBin "sandix" ''
+            set -eu
+
+            self="$(${pkgs.coreutils}/bin/readlink -f "$0")"
+            command="''${1-}"
+            if [ -z "$command" ]; then
+              exec ${pkgs.lib.getExe sandix-unwrapped}
+            fi
+            shift
+
+            exec ${pkgs.lib.getExe sandix-unwrapped} "$command" \
+              --bash ${pkgs.bash}/bin/bash \
+              --nix ${pkgs.lib.getExe pkgs.nix} \
+              --builder ${pkgs.lib.getExe wrapperBuilder} \
+              --direnv ${pkgs.lib.getExe pkgs.direnv} \
+              --landrun ${pkgs.lib.getExe pkgs.landrun} \
+              --sandix "$self" \
+              --shell ${pkgs.runtimeShell} \
+              "$@"
+          '';
+
+          direnv-sandbox = pkgs.writeShellScriptBin "direnv-sandbox" ''
+              exec ${pkgs.lib.getExe default} direnv-bash -- "$@"
+          '';
         }
       );
 
