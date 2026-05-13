@@ -65,18 +65,25 @@ func RewritePathAdded(pathValue, previousPath, nixPath, sandixPath, builderPath,
 			rewrittenEntries = append(rewrittenEntries, entry)
 			continue
 		}
-		if wrapped, ok := cache.lookup(entry); ok {
-			rewrittenEntries = append(rewrittenEntries, filepath.Join(wrapped, "bin"))
-			continue
-		}
-		wrapped, err := buildWrappedBinDir(entry, nixPath, sandixPath, builderPath, landrunPath, shellPath)
+		wrapped, err := wrappedBinDir(entry, cache, nixPath, sandixPath, builderPath, landrunPath, shellPath)
 		if err != nil {
 			return "", err
 		}
-		cache.store(entry, wrapped)
 		rewrittenEntries = append(rewrittenEntries, filepath.Join(wrapped, "bin"))
 	}
 	return strings.Join(rewrittenEntries, string(filepath.ListSeparator)), nil
+}
+
+func wrappedBinDir(entry string, cache *wrapperCache, nixPath, sandixPath, builderPath, landrunPath, shellPath string) (string, error) {
+	if wrapped, ok := cache.lookup(entry); ok {
+		return wrapped, nil
+	}
+	wrapped, err := buildWrappedBinDir(entry, nixPath, sandixPath, builderPath, landrunPath, shellPath)
+	if err != nil {
+		return "", err
+	}
+	cache.store(entry, wrapped)
+	return wrapped, nil
 }
 
 func pathEntrySet(pathValue string) map[string]struct{} {

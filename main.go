@@ -17,6 +17,7 @@ import (
 
 	"github.com/lorenzbischof/sandix/internal/nixwrap"
 	"github.com/lorenzbischof/sandix/internal/rewriter"
+	"github.com/lorenzbischof/sandix/internal/sandbox"
 )
 
 func currentSandixPath() (string, error) {
@@ -160,7 +161,10 @@ func cmdDirenvBash(args []string) {
 			delete(landrunEnv, key)
 		}
 	}
-	cmd := sandboxCommand(*trusted.landrunPath, landrunEnv, evaluatorEnv, append([]string{bashPath}, fs.Args()...))
+	cmd, err := sandbox.LandrunCommand(*trusted.landrunPath, landrunEnv, evaluatorEnv, append([]string{bashPath}, fs.Args()...))
+	if err != nil {
+		log.Fatalf("failed to build sandbox command: %v", err)
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stderr = os.Stderr
 
@@ -191,39 +195,8 @@ func cmdDirenvBash(args []string) {
 	os.Exit(exitCode)
 }
 
-func baseSandboxEnv(hostEnv map[string]string) map[string]string {
-	keys := []string{
-		"HOME",
-		"USER",
-		"TERM",
-		"TERMINFO",
-		"TERMINFO_DIRS",
-		"COLORTERM",
-		"LANG",
-		"LC_ALL",
-		"LC_CTYPE",
-		"NIX_REMOTE",
-		"SSL_CERT_FILE",
-		"NIX_SSL_CERT_FILE",
-		"NIX_PATH",
-	}
-
-	reduced := make(map[string]string)
-	for _, key := range keys {
-		if value, ok := hostEnv[key]; ok {
-			reduced[key] = value
-		}
-	}
-
-	if value, ok := hostEnv["PATH"]; ok {
-		reduced["PATH"] = value
-	}
-
-	return reduced
-}
-
 func direnvEvaluatorEnv(hostEnv map[string]string, diff direnvDiff, diffOK bool) map[string]string {
-	input := baseSandboxEnv(hostEnv)
+	input := sandbox.BaseEnv(hostEnv)
 	if !diffOK {
 		return input
 	}
@@ -353,14 +326,6 @@ func envMap(environ []string) map[string]string {
 		env[key] = value
 	}
 	return env
-}
-
-func envList(env map[string]string) []string {
-	items := make([]string, 0, len(env))
-	for key, value := range env {
-		items = append(items, key+"="+value)
-	}
-	return items
 }
 
 func cmdDirenvExport(args []string) {
@@ -496,7 +461,7 @@ func cmdExec(args []string) {
 		log.Fatalf("failed to decode DIRENV_DIFF: %v", err)
 	}
 
-	commandEnv := baseSandboxEnv(landrunEnv)
+	commandEnv := sandbox.BaseEnv(landrunEnv)
 	if ok {
 		commandEnv = diff.Next
 
@@ -505,7 +470,10 @@ func cmdExec(args []string) {
 		}
 	}
 
-	cmd := sandboxCommand(*trusted.landrunPath, landrunEnv, commandEnv, fs.Args())
+	cmd, err := sandbox.LandrunCommand(*trusted.landrunPath, landrunEnv, commandEnv, fs.Args())
+	if err != nil {
+		log.Fatalf("failed to build sandbox command: %v", err)
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -515,124 +483,4 @@ func cmdExec(args []string) {
 		}
 		log.Fatalf("landrun failed: %v", err)
 	}
-}
-
-func sandboxCommand(landrunPath string, hostEnv map[string]string, commandEnv map[string]string, commandArgs []string) *exec.Cmd {
-	landrunArgs := make([]string, 0, 64+len(commandArgs))
-	keys := make([]string, 0, len(commandEnv))
-	for key := range commandEnv {
-		if isBaseSandboxEnvKey(key) {
-			continue
-		}
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		landrunArgs = append(landrunArgs, "--env", key+"="+commandEnv[key])
-	}
-
-	addSandboxFilesystemArgs(&landrunArgs)
-	addBaseSandboxEnvArgs(&landrunArgs, commandEnv)
-
-	landrunArgs = append(landrunArgs, "--")
-	landrunArgs = append(landrunArgs, commandArgs...)
-
-	cmd := exec.Command(landrunPath, landrunArgs...)
-	cmd.Env = envList(hostEnv)
-	return cmd
-}
-
-func addSandboxFilesystemArgs(args *[]string) {
-	home := os.Getenv("HOME")
-	if home != "" {
-		xdgConfigHome := os.Getenv("XDG_CONFIG_HOME")
-		if xdgConfigHome == "" {
-			xdgConfigHome = filepath.Join(home, ".config")
-		}
-		xdgCacheHome := os.Getenv("XDG_CACHE_HOME")
-		if xdgCacheHome == "" {
-			xdgCacheHome = filepath.Join(home, ".cache")
-		}
-		if pathExists(filepath.Join(xdgConfigHome, "direnv")) {
-			*args = append(*args, "--ro", filepath.Join(xdgConfigHome, "direnv"))
-		}
-		if pathExists(filepath.Join(xdgConfigHome, "nix")) {
-			*args = append(*args, "--ro", filepath.Join(xdgConfigHome, "nix"))
-		}
-		if pathExists(xdgCacheHome) {
-			*args = append(*args, "--rw", xdgCacheHome)
-		}
-	}
-
-	for _, path := range []string{
-		"/etc/nix",
-		"/etc/resolv.conf",
-		"/etc/hosts",
-		"/etc/nsswitch.conf",
-	} {
-		if pathExists(path) {
-			*args = append(*args, "--ro", path)
-		}
-	}
-	if pathExists("/nix/var/nix/daemon-socket/socket") {
-		*args = append(*args, "--rw", "/nix/var/nix/daemon-socket/socket")
-	}
-
-	pwd := os.Getenv("PWD")
-	if pwd == "" {
-		var err error
-		pwd, err = os.Getwd()
-		if err != nil {
-			log.Fatalf("failed to resolve working directory: %v", err)
-		}
-	}
-
-	*args = append(*args,
-		"--unrestricted-network",
-		"--rox", "/nix/store",
-		"--rwx", pwd,
-		"--rw", "/tmp",
-		"--rw", "/proc,/dev,/sys",
-	)
-}
-
-func addBaseSandboxEnvArgs(args *[]string, commandEnv map[string]string) {
-	for _, key := range baseSandboxEnvKeys {
-		if value, exists := commandEnv[key]; exists {
-			*args = append(*args, "--env", key+"="+value)
-			continue
-		}
-		*args = append(*args, "--env", key)
-	}
-}
-
-var baseSandboxEnvKeys = []string{
-	"HOME",
-	"USER",
-	"PATH",
-	"TERM",
-	"TERMINFO",
-	"TERMINFO_DIRS",
-	"COLORTERM",
-	"LANG",
-	"LC_ALL",
-	"LC_CTYPE",
-	"NIX_REMOTE",
-	"SSL_CERT_FILE",
-	"NIX_SSL_CERT_FILE",
-	"NIX_PATH",
-}
-
-func isBaseSandboxEnvKey(key string) bool {
-	for _, baseKey := range baseSandboxEnvKeys {
-		if key == baseKey {
-			return true
-		}
-	}
-	return false
-}
-
-func pathExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }

@@ -65,24 +65,6 @@ func TestApplyOverlayPreservesHostOnlyVars(t *testing.T) {
 	}
 }
 
-func TestBaseSandboxEnvUsesPath(t *testing.T) {
-	got := baseSandboxEnv(map[string]string{
-		"PATH":      "/devshell/bin",
-		"HOST_ONLY": "not-forwarded",
-		"HOME":      "/home/me",
-	})
-
-	if got["PATH"] != "/devshell/bin" {
-		t.Fatalf("expected PATH in sandbox PATH, got %q", got["PATH"])
-	}
-	if _, ok := got["HOST_ONLY"]; ok {
-		t.Fatalf("host-only variable should not be in reduced sandbox input")
-	}
-	if got["HOME"] != "/home/me" {
-		t.Fatalf("HOME should be forwarded")
-	}
-}
-
 func TestDirenvEvaluatorEnvUsesPreviousDirenvEnv(t *testing.T) {
 	got := direnvEvaluatorEnv(
 		map[string]string{
